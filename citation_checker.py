@@ -34,6 +34,9 @@ class Citation:
     year: Optional[str]
     venue: Optional[str]
     raw_entry: str
+    doi: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    url: Optional[str] = None
 
 
 class BibTeXParser:
@@ -308,6 +311,9 @@ class BibTeXParser:
             self._get_field_value(field_map, 'booktitle') or
             self._get_field_value(field_map, 'howpublished')
         )
+        doi = self._get_field_value(field_map, 'doi')
+        arxiv_id = self._extract_arxiv_id(field_map)
+        url = self._get_field_value(field_map, 'url')
 
         if not title:
             return None
@@ -319,8 +325,27 @@ class BibTeXParser:
             authors=authors,
             year=year,
             venue=venue,
-            raw_entry=raw_entry
+            raw_entry=raw_entry,
+            doi=doi,
+            arxiv_id=arxiv_id,
+            url=url
         )
+
+    def _extract_arxiv_id(self, field_map: Dict[str, str]) -> Optional[str]:
+        """Extract arXiv ID from various fields"""
+        # Check eprint field first
+        eprint = self._get_field_value(field_map, 'eprint')
+        if eprint:
+            return eprint
+
+        # Check URL for arxiv pattern
+        url = self._get_field_value(field_map, 'url')
+        if url:
+            match = re.search(r'arxiv\.org/(?:abs|pdf)/([0-9]+\.[0-9]+(?:v[0-9]+)?)', url, re.IGNORECASE)
+            if match:
+                return match.group(1)
+
+        return None
 
     def _extract_authors(self, author_str: Optional[str]) -> List[str]:
         """Extract and parse author list, returning full names as in BibTeX"""
@@ -739,6 +764,180 @@ class CitationValidator:
         return results
 
 
+class DuplicateChecker:
+    """Detects duplicate and similar entries in BibTeX citations"""
+
+    def __init__(self, title_threshold: float = 0.85, author_threshold: float = 0.8):
+        """
+        Initialize duplicate checker
+
+        Args:
+            title_threshold: Minimum similarity ratio to consider titles as similar (default: 0.85)
+            author_threshold: Minimum author overlap ratio to consider similar (default: 0.8)
+        """
+        self.title_threshold = title_threshold
+        self.author_threshold = author_threshold
+
+    def find_duplicates(self, citations: List[Citation]) -> List[Dict]:
+        """
+        Find all duplicate and similar citations
+
+        Returns a list of duplicate groups, where each group contains similar citations
+        """
+        duplicates = []
+        processed = set()
+
+        for i, citation1 in enumerate(citations):
+            if citation1.key in processed:
+                continue
+
+            group = []
+
+            for j, citation2 in enumerate(citations):
+                if i == j or citation2.key in processed:
+                    continue
+
+                similarity_info = self._check_similarity(citation1, citation2)
+
+                if similarity_info['is_duplicate']:
+                    if not group:
+                        # Start a new group with the first citation
+                        group.append({
+                            'citation_key': citation1.key,
+                            'title': citation1.title,
+                            'authors': citation1.authors,
+                            'year': citation1.year,
+                            'venue': citation1.venue,
+                            'doi': citation1.doi,
+                            'arxiv_id': citation1.arxiv_id
+                        })
+
+                    group.append({
+                        'citation_key': citation2.key,
+                        'title': citation2.title,
+                        'authors': citation2.authors,
+                        'year': citation2.year,
+                        'venue': citation2.venue,
+                        'doi': citation2.doi,
+                        'arxiv_id': citation2.arxiv_id
+                    })
+
+                    processed.add(citation2.key)
+
+            if group:
+                processed.add(citation1.key)
+                duplicates.append({
+                    'group': group,
+                    'reason': similarity_info['reason'],
+                    'similarity_score': similarity_info['score']
+                })
+
+        return duplicates
+
+    def _check_similarity(self, cit1: Citation, cit2: Citation) -> Dict:
+        """
+        Check if two citations are duplicates or similar
+
+        Returns a dict with is_duplicate, reason, and similarity score
+        """
+        reasons = []
+        max_score = 0.0
+
+        # 1. Check exact DOI match (strongest indicator)
+        if cit1.doi and cit2.doi:
+            if cit1.doi.lower() == cit2.doi.lower():
+                return {
+                    'is_duplicate': True,
+                    'reason': 'Same DOI',
+                    'score': 1.0
+                }
+
+        # 2. Check exact arXiv ID match
+        if cit1.arxiv_id and cit2.arxiv_id:
+            # Normalize arxiv IDs (remove version numbers for comparison)
+            arxiv1 = re.sub(r'v\d+$', '', cit1.arxiv_id)
+            arxiv2 = re.sub(r'v\d+$', '', cit2.arxiv_id)
+            if arxiv1 == arxiv2:
+                return {
+                    'is_duplicate': True,
+                    'reason': 'Same arXiv ID',
+                    'score': 1.0
+                }
+
+        # 3. Check title similarity
+        title_similarity = self._similarity(
+            cit1.title.lower(),
+            cit2.title.lower()
+        )
+        max_score = max(max_score, title_similarity)
+
+        if title_similarity >= self.title_threshold:
+            reasons.append(f'Similar title (similarity: {title_similarity:.2f})')
+
+        # 4. Check author overlap
+        author_overlap = self._author_overlap(cit1.authors, cit2.authors)
+
+        if author_overlap >= self.author_threshold:
+            reasons.append(f'Similar authors (overlap: {author_overlap:.2f})')
+
+        # 5. Combine criteria
+        # Consider duplicates if high title similarity AND some author overlap
+        # OR very high title similarity alone
+        is_duplicate = False
+        combined_reason = None
+
+        if title_similarity >= 0.95:
+            # Very high title similarity alone
+            is_duplicate = True
+            combined_reason = f'Very similar title (similarity: {title_similarity:.2f})'
+        elif title_similarity >= self.title_threshold and author_overlap >= self.author_threshold:
+            # Both title and author similarity
+            is_duplicate = True
+            combined_reason = f'Similar title ({title_similarity:.2f}) and authors ({author_overlap:.2f})'
+        elif title_similarity >= self.title_threshold and author_overlap >= 0.5:
+            # Good title similarity with moderate author overlap
+            is_duplicate = True
+            combined_reason = f'Similar title ({title_similarity:.2f}) with author overlap ({author_overlap:.2f})'
+
+        return {
+            'is_duplicate': is_duplicate,
+            'reason': combined_reason if combined_reason else '; '.join(reasons),
+            'score': title_similarity
+        }
+
+    def _similarity(self, a: str, b: str) -> float:
+        """Calculate similarity ratio between two strings"""
+        return SequenceMatcher(None, a, b).ratio()
+
+    def _author_overlap(self, authors1: List[str], authors2: List[str]) -> float:
+        """
+        Calculate author overlap ratio using last names
+        Returns a value between 0 and 1
+        """
+        if not authors1 or not authors2:
+            return 0.0
+
+        # Extract last names
+        last_names1 = {self._get_last_name(a).lower() for a in authors1}
+        last_names2 = {self._get_last_name(a).lower() for a in authors2}
+
+        # Calculate Jaccard similarity
+        intersection = len(last_names1 & last_names2)
+        union = len(last_names1 | last_names2)
+
+        return intersection / union if union > 0 else 0.0
+
+    def _get_last_name(self, author: str) -> str:
+        """Extract last name from author string"""
+        if ',' in author:
+            # Format: "Last, First"
+            return author.split(',')[0].strip()
+        else:
+            # Format: "First Last" - take last token
+            tokens = author.strip().split()
+            return tokens[-1] if tokens else author
+
+
 class ReportGenerator:
     """Generates validation reports"""
 
@@ -1067,8 +1266,8 @@ def main():
     parser.add_argument(
         '--delay',
         type=float,
-        default=1.0,
-        help='Delay between Scholar queries in seconds (default: 1.0)'
+        default=1.5,
+        help='Delay between Scholar queries in seconds (default: 1.5)'
     )
     parser.add_argument(
         '--limit',
@@ -1101,6 +1300,66 @@ def main():
     print(f"\nParsing BibTeX file: {args.bibfile}")
     bib_parser = BibTeXParser(args.bibfile)
     all_citations = bib_parser.parse()
+    print(f"✓ Parsed {len(all_citations)} citations")
+
+    # Check for duplicates
+    duplicates_json_path = os.path.join(result_dir, 'duplicates.json')
+    duplicates_txt_path = os.path.join(result_dir, 'duplicates.txt')
+
+    print("\n" + "=" * 70)
+    print("CHECKING FOR DUPLICATES")
+    print("=" * 70)
+
+    duplicate_checker = DuplicateChecker(title_threshold=0.85, author_threshold=0.8)
+    duplicate_groups = duplicate_checker.find_duplicates(all_citations)
+
+    if duplicate_groups:
+        print(f"\n⚠ Found {len(duplicate_groups)} groups of duplicate/similar entries:")
+
+        # Save JSON report
+        with open(duplicates_json_path, 'w', encoding='utf-8') as f:
+            json.dump(duplicate_groups, f, indent=2, ensure_ascii=False)
+
+        # Save text report
+        with open(duplicates_txt_path, 'w', encoding='utf-8') as f:
+            f.write("DUPLICATE ENTRIES REPORT\n")
+            f.write("=" * 100 + "\n\n")
+            f.write(f"Found {len(duplicate_groups)} groups of duplicate/similar entries\n\n")
+
+            for i, dup_group in enumerate(duplicate_groups, 1):
+                print(f"\n  Group {i}: {len(dup_group['group'])} similar entries")
+                print(f"    Reason: {dup_group['reason']}")
+
+                f.write(f"GROUP {i}\n")
+                f.write("-" * 100 + "\n")
+                f.write(f"Reason: {dup_group['reason']}\n")
+                f.write(f"Similarity Score: {dup_group['similarity_score']:.2f}\n\n")
+
+                for j, entry in enumerate(dup_group['group'], 1):
+                    print(f"      {j}. [{entry['citation_key']}] {entry['title'][:60]}...")
+
+                    f.write(f"  {j}. Citation Key: {entry['citation_key']}\n")
+                    f.write(f"     Title: {entry['title']}\n")
+                    f.write(f"     Authors: {', '.join(entry['authors']) if entry['authors'] else 'N/A'}\n")
+                    f.write(f"     Year: {entry['year'] or 'N/A'}\n")
+                    f.write(f"     Venue: {entry['venue'] or 'N/A'}\n")
+                    if entry['doi']:
+                        f.write(f"     DOI: {entry['doi']}\n")
+                    if entry['arxiv_id']:
+                        f.write(f"     arXiv: {entry['arxiv_id']}\n")
+                    f.write("\n")
+
+                f.write("\n")
+
+        print(f"\n✓ Duplicate report saved to: {duplicates_txt_path}")
+        print(f"✓ Duplicate JSON report saved to: {duplicates_json_path}")
+    else:
+        print("\n✓ No duplicates found!")
+        # Remove duplicate files if they exist
+        if os.path.exists(duplicates_json_path):
+            os.remove(duplicates_json_path)
+        if os.path.exists(duplicates_txt_path):
+            os.remove(duplicates_txt_path)
 
     # Handle retry mode
     key_to_index = None
