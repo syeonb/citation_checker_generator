@@ -1,0 +1,5 @@
+Attention Is All You Need
+Deep Residual Learning for Image Recognition
+BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding
+Generative Adversarial Networks
+ImageNet Classification with Deep Convolutional Neural Networks
