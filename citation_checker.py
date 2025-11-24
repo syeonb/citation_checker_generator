@@ -21,7 +21,7 @@ import shutil
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_REPORT_PATH = os.path.join(SCRIPT_DIR, 'result', 'citation_report.json')
+DEFAULT_REPORT_PATH = os.path.join(SCRIPT_DIR, 'validation_result', 'citation_report.json')
 
 
 @dataclass
@@ -1261,7 +1261,7 @@ def main():
     parser.add_argument(
         '--output', '-o',
         default=DEFAULT_REPORT_PATH,
-        help='Output JSON file for detailed report (default: result/citation_report.json)'
+        help='Output JSON file for detailed report (default: validation_result/citation_report.json)'
     )
     parser.add_argument(
         '--delay',
