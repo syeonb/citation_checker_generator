@@ -1274,21 +1274,15 @@ def main():
         type=int,
         help='Limit number of citations to check (for testing)'
     )
-    parser.add_argument(
-        '--retry',
-        action='store_true',
-        help='Retry only failed citations from previous run'
-    )
 
     args = parser.parse_args()
     args.output = os.path.abspath(args.output)
     output_dir = os.path.dirname(args.output)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    result_dir = os.path.join(SCRIPT_DIR, 'result')
+    result_dir = os.path.join(SCRIPT_DIR, 'validation_result')
     os.makedirs(result_dir, exist_ok=True)
-    if not args.retry:
-        _clean_result_dir(result_dir)
+    _clean_result_dir(result_dir)
     failed_json_path = os.path.join(result_dir, 'failed_citations.json')
     arxiv_json_path = os.path.join(result_dir, 'arxiv_citations.json')
     author_initial_json_path = os.path.join(result_dir, 'author_initial_matches.json')
@@ -1361,47 +1355,10 @@ def main():
         if os.path.exists(duplicates_txt_path):
             os.remove(duplicates_txt_path)
 
-    # Handle retry mode
-    key_to_index = None
-    previous_results_data = None
-    if args.retry:
-        if not os.path.exists(args.output):
-            print(f"✗ No previous report found at {args.output}")
-            print("  Run without --retry first to generate initial report")
-            return
-        if not os.path.exists(failed_json_path):
-            print(f"✗ No failed citations report found at {failed_json_path}")
-            print("  Run without --retry first to generate failed_citations.json")
-            return
-
-        with open(args.output, 'r') as f:
-            previous_results_data = json.load(f)
-
-        with open(failed_json_path, 'r', encoding='utf-8') as f:
-            failed_results = json.load(f)
-
-        failed_entries = [(r['citation_key'], r.get('index', '?')) for r in failed_results]
-        if not failed_entries:
-            print("\n✓ No failed citations to retry!")
-            return
-
-        failed_keys = [entry[0] for entry in failed_entries]
-        key_to_index = {key: idx for key, idx in failed_entries}
-
-        print(f"\n✓ Found {len(failed_keys)} failed citations to retry:")
-        for i, (key, idx) in enumerate(failed_entries, 1):
-            print(f"  {i}. [#{idx}] {key}")
-
-        # Filter to only failed ones
-        citations = [c for c in all_citations if c.key in failed_keys]
-
-        if not citations:
-            print("\n✓ No failed citations to retry!")
-            return
-    else:
-        citations = all_citations
-        if args.limit:
-            citations = citations[:args.limit]
+    # Process citations
+    citations = all_citations
+    if args.limit:
+        citations = citations[:args.limit]
 
     print(f"\n✓ Processing {len(citations)} citations")
 
@@ -1409,50 +1366,9 @@ def main():
     results = validator.validate_all(
         citations,
         delay=args.delay,
-        json_output=args.output if not args.retry else None,
-        failed_output=failed_json_path if not args.retry else None
+        json_output=args.output,
+        failed_output=failed_json_path
     )
-
-    # In retry mode, restore original indices and merge with previous results
-    if args.retry and key_to_index:
-        for result in results:
-            if result['citation_key'] in key_to_index:
-                result['index'] = key_to_index[result['citation_key']]
-
-        # Merge with previous results
-        if previous_results_data is None:
-            with open(args.output, 'r', encoding='utf-8') as f:
-                previous_results = json.load(f)
-        else:
-            previous_results = previous_results_data
-
-        # Create a mapping of citation_key to new result
-        new_results_map = {r['citation_key']: r for r in results}
-
-        # Update previous results
-        for i, prev_result in enumerate(previous_results):
-            key = prev_result['citation_key']
-            if key in new_results_map:
-                previous_results[i] = new_results_map[key]
-
-        # Save merged results
-        with open(args.output, 'w', encoding='utf-8') as f:
-            json.dump(previous_results, f, indent=2, ensure_ascii=False)
-
-        print(f"\n✓ Updated report saved to: {args.output}")
-
-        # Update failed_citations.json in /result
-        failed = [r for r in previous_results if r['status'] == 'error']
-        if failed:
-            _save_failed_report(failed)
-            print(f"✓ Updated failed_citations.json ({len(failed)} still failing)")
-        else:
-            # Remove failed_citations.json if no more failures
-            if os.path.exists(failed_json_path):
-                os.remove(failed_json_path)
-            print("✓ All citations validated successfully!")
-
-        results = previous_results
 
     _save_arxiv_citations(results, arxiv_json_path)
     _save_author_initial_matches(results, author_initial_json_path)
@@ -1462,24 +1378,22 @@ def main():
     reporter.print_summary(results)
     reporter.print_detailed_report(results)
 
-    if not args.retry:
-        print(f"\n✓ Full report saved to: {args.output}")
+    print(f"\n✓ Full report saved to: {args.output}")
 
-        # Create initial failed_citations.json in /result
-        failed = [r for r in results if r['status'] == 'error']
-        if failed:
-            _save_failed_report(failed)
-            print(f"✓ Failed citations report saved to: {failed_json_path}")
+    # Create initial failed_citations.json
+    failed = [r for r in results if r['status'] == 'error']
+    if failed:
+        _save_failed_report(failed)
+        print(f"✓ Failed citations report saved to: {failed_json_path}")
 
-    # Always generate discrepancies report in /result/discrepancies.txt
+    # Always generate discrepancies report
     discrepancies_file = os.path.join(result_dir, 'discrepancies.txt')
     reporter.save_discrepancies_report(results, discrepancies_file)
 
     print("\n" + "=" * 70)
 
     # Check if there are failed citations and retry if needed
-    failed = [r for r in results if r['status'] == 'error']
-    if failed and not args.retry:
+    if failed:
         print(f"\nFound {len(failed)} failed citations. Starting auto-retry loop...")
         retry_count = 0
 
